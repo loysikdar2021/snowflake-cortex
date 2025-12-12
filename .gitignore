@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.ipynb_checkpoints/
+.env
+.venv
+env/
+venv/
+
+# Fabric / Azure
+.azure/
+config.json
+
+# IDE
+.vscode/
+.idea/
