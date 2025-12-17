@@ -1,0 +1,296 @@
+Here’s a 20-slide storyline you can almost drop straight into PowerPoint.
+I’ll keep it plain English but still name the key tables, views, Snowflake, Cortex, and `mistral-large2`.
+
+---
+
+### Slide 1 – Title & Story
+
+* **Title:** Call Center Anomaly Detection & AI Explanations in Snowflake
+* We built a **hypothetical lab** that simulates call center and knowledge management activity.
+* The goal: **detect unusual calls** and **explain them** using Snowflake, Snowpark, Cortex, and the `mistral-large2` model.
+
+---
+
+### Slide 2 – Business Problem
+
+* Call centers handle large volumes of interactions every day.
+* Some calls are **outliers**: extremely long handle times, unusual KM usage, repeated escalations.
+* Supervisors need:
+
+  * A way to **detect** these anomalies at scale.
+  * A way to **understand why** they are happening and what to do.
+
+---
+
+### Slide 3 – Synthetic Data Design
+
+* To avoid using real customer data, we created a **synthetic dataset**.
+* Core object: a single fact table called **`LAB_CALL_CENTER_KM`**.
+* It contains ~**100,000 rows** of call records over **12 months**.
+* Each row represents **one call** with metrics from:
+
+  * The call itself
+  * The knowledge management system (KM) used during the call.
+
+---
+
+### Slide 4 – Main Table: LAB_CALL_CENTER_KM
+
+* Key columns in `LAB_CALL_CENTER_KM`:
+
+  * `CALL_ID`, `CALL_START_TS`, `CALL_END_TS`, `CALL_DATE`, `YEAR_MONTH`
+  * `AGENT_ID`, `CUSTOMER_ID`, `CALL_TYPE`, `CALL_HANDLE_TYPE`, `CHANNEL`
+  * `HANDLE_TIME_SEC`, `KM_TIME_SEC`, `AFTER_CALL_WORK_SEC`, `HOLD_TIME_SEC`
+  * `KM_SEARCH_COUNT`, `KM_ARTICLES_VIEWED`, `AGENT_TENURE_MONTHS`
+  * `IS_ANOMALY`, `ANOMALY_REASON` (ground-truth labels)
+  * `DATASET_SPLIT` = `'TRAIN'`, `'TEST'`, `'PROD'`.
+
+---
+
+### Slide 5 – Anomaly Strategy (ExtremeLongHandleTime)
+
+* We **inject anomalies by design** to create a labeled training and evaluation set.
+* Target behavior:
+
+  * About **10% of calls** have **`ANOMALY_REASON = 'ExtremeLongHandleTime'`**.
+  * These calls have **massively inflated `HANDLE_TIME_SEC`** compared to normal calls.
+* The rest (~90%) are labeled as `'Normal'`.
+* This gives us a clean lab setup for **anomaly detection** and **model evaluation**.
+
+---
+
+### Slide 6 – Train / Test / Prod Split
+
+* We split `LAB_CALL_CENTER_KM` into time-based segments using `CALL_DATE`:
+
+  * **TRAIN:** Early months (e.g., Jan–Aug)
+  * **TEST:** Middle months (e.g., Sep–Oct)
+  * **PROD:** Later months (e.g., Nov–Dec)
+* The split is stored in the table as `DATASET_SPLIT`.
+* Optionally, we created derived tables:
+
+  * `LAB_CALL_CENTER_KM_TRAIN`
+  * `LAB_CALL_CENTER_KM_TEST`
+  * `LAB_CALL_CENTER_KM_PROD`.
+
+---
+
+### Slide 7 – Snowflake & Snowpark Setup
+
+* The project runs entirely in **Snowflake**:
+
+  * Database example: `ANOM_DETX`
+  * Schema example: `AD_LABS`
+* We use **Snowpark for Python** to:
+
+  * Read from `LAB_CALL_CENTER_KM`
+  * Prepare features
+  * Train and apply the anomaly model.
+* Snowpark session reads from Snowflake and can also use **local stages** to store models.
+
+---
+
+### Slide 8 – Features for Anomaly Detection
+
+* From the `LAB_CALL_CENTER_KM` table we derive a **numeric feature set**:
+
+  * `HANDLE_TIME_SEC`
+  * `KM_TIME_SEC`
+  * `AFTER_CALL_WORK_SEC`
+  * `HOLD_TIME_SEC`
+  * `KM_SEARCH_COUNT`
+  * `KM_ARTICLES_VIEWED`
+  * `AGENT_TENURE_MONTHS`
+  * `HOUR_OF_DAY`, `DAY_OF_WEEK`
+* For the anomaly model, we:
+
+  * Use these as **inputs**
+  * Keep `IS_ANOMALY` only for **evaluation**, not as a supervised label.
+
+---
+
+### Slide 9 – Model Training with Snowpark
+
+* Inside Snowpark, we export the train partition to pandas and use **scikit-learn**.
+* Algorithm: **Isolation Forest** (unsupervised anomaly detection).
+* Configuration:
+
+  * `contamination=0.10` to reflect the ~10% anomaly rate.
+* We fit the model on **TRAIN** data only, using Snowflake compute via Snowpark.
+
+---
+
+### Slide 10 – Evaluation on TEST Data
+
+* On the **TEST** subset we:
+
+  * Score calls using the Isolation Forest (anomaly vs. normal).
+  * Compare predictions against the ground-truth `IS_ANOMALY`.
+* Metrics computed:
+
+  * Classification report (precision, recall, F1)
+  * ROC AUC based on anomaly scores.
+* This verifies how well the model recovers the synthetic `ExtremeLongHandleTime` anomalies.
+
+---
+
+### Slide 11 – Scoring PROD and Persisting Results
+
+* We apply the trained model to the **PROD** segment.
+* For each call we store:
+
+  * `PRED_IS_ANOMALY` (0/1)
+  * `ANOMALY_SCORE` (continuous, higher = more anomalous).
+* Results are written back to Snowflake as a separate table:
+
+  * **`LAB_CALL_CENTER_KM_PROD_SCORED`**.
+* This table becomes the basis for **downstream analytics and dashboards**.
+
+---
+
+### Slide 12 – Core Analytics View: VW_CALL_CENTER_ANOMALY_BASE
+
+* To simplify BI access, we join base data and scores into a **view**:
+
+  * **`VW_CALL_CENTER_ANOMALY_BASE`**
+* This view includes:
+
+  * All call metrics and dimensions from `LAB_CALL_CENTER_KM` (for PROD only).
+  * Model outputs from `LAB_CALL_CENTER_KM_PROD_SCORED`:
+
+    * `PRED_IS_ANOMALY`
+    * `ANOMALY_SCORE`
+  * Ground-truth labels:
+
+    * `TRUE_LABEL_IS_ANOMALY`
+    * `TRUE_ANOMALY_REASON`.
+
+---
+
+### Slide 13 – Top Anomalies per Agent and Call Type
+
+* We define **derived views** that rank anomalies:
+
+  * `VW_TOP_ANOMALOUS_CALLS_PER_AGENT_MONTH`
+  * `VW_TOP_ANOMALOUS_CALLS_PER_CALLTYPE_MONTH`
+* These views:
+
+  * Use `ROW_NUMBER()` over `(YEAR_MONTH, AGENT_ID)` or `(YEAR_MONTH, CALL_TYPE)`
+  * Sort by `ANOMALY_SCORE` descending
+  * Keep “top N” anomalous calls per slice (e.g., top 10).
+* These are ideal inputs for **drill-down dashboards**.
+
+---
+
+### Slide 14 – Aggregated KPI Views
+
+* We also create summary views for **KPI-level monitoring**:
+
+  * `VW_AGENT_MONTH_ANOMALY_SUMMARY`
+  * `VW_CALLTYPE_MONTH_ANOMALY_SUMMARY`
+* These compute per month and per agent / call type:
+
+  * `TOTAL_CALLS`
+  * `PRED_ANOMALY_COUNT` and `PRED_ANOMALY_RATE`
+  * `AVG_ANOMALY_SCORE`, `MAX_ANOMALY_SCORE`
+  * Optional measures comparing to the “true” synthetic labels.
+* This supports **heatmaps and trend charts** in BI.
+
+---
+
+### Slide 15 – BI Dashboard Concept
+
+* Using these views as a **semantic layer**, we can build dashboards in tools like Power BI:
+
+  * Overview page:
+
+    * Total calls, anomaly rate, anomaly trends by month.
+  * Agent risk page:
+
+    * Matrix of agents vs. months with anomaly rates (heatmap).
+  * Call type deep dive:
+
+    * Anomalies by call type and channel, with drill-through to individual calls.
+* At this point we know **which calls are anomalous**, but not **why**.
+* That’s where **Cortex** and **mistral-large2** come in.
+
+---
+
+### Slide 16 – Introducing Snowflake Cortex & mistral-large2
+
+* **Snowflake Cortex** provides built-in LLM capabilities directly in SQL.
+* We use `SNOWFLAKE.CORTEX.COMPLETE` with the **`mistral-large2`** model.
+* Objective:
+
+  * Turn model outputs (scores) and metrics into **plain-language explanations**.
+  * Stay **inside Snowflake**, leveraging governance and security.
+* This allows data and analytics teams to add **narrative context** to anomalies.
+
+---
+
+### Slide 17 – Per-Call Explanations with Cortex Complete
+
+* We define a prompt that describes the model’s role:
+
+  * “You are a senior call center performance analyst...”
+* For each anomalous call from `VW_CALL_CENTER_ANOMALY_BASE`, we pass:
+
+  * A JSON object built via `OBJECT_CONSTRUCT(...)` and `TO_JSON(...)`.
+  * It includes fields like `CALL_ID`, `AGENT_ID`, `CALL_TYPE`, `HANDLE_TIME_SEC`, `KM_TIME_SEC`, `ANOMALY_SCORE`, etc.
+* We call:
+
+  * `SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', <prompt || metrics JSON>)`
+* Output: a **short explanation** of why the call is unusual and a **coaching recommendation**.
+
+---
+
+### Slide 18 – Explanations Table & View
+
+* We persist explanations into a dedicated table:
+
+  * **`CALL_CENTER_ANOMALY_EXPLANATIONS`**
+  * Columns: `CALL_ID`, `EXPLANATION_TS`, `MODEL_NAME`, `ANOMALY_EXPLANATION`.
+* Then we create a joined view:
+
+  * **`VW_CALL_CENTER_ANOMALY_WITH_EXPLANATION`**
+  * Combines `VW_CALL_CENTER_ANOMALY_BASE` with the explanations table.
+* BI tools can now show for each anomalous call:
+
+  * Metrics, scores, and a **human-readable explanation** generated by `mistral-large2`.
+
+---
+
+### Slide 19 – Pattern-Level Summaries with Cortex
+
+* Beyond single calls, we can give Cortex **aggregated metrics**:
+
+  * For example, agent-month anomaly stats from `VW_AGENT_MONTH_ANOMALY_SUMMARY`.
+* We pass an **array of JSON objects** summarizing agents:
+
+  * `year_month`, `agent_id`, `total_calls`, `pred_anomaly_rate`, `avg_handle_time_sec`, etc.
+* Cortex with `mistral-large2` then returns:
+
+  * A narrative of **which agents are most at risk**,
+  * **Patterns** across anomalies, and
+  * **Recommended interventions** (training, process changes, KM improvements).
+
+---
+
+### Slide 20 – End-to-End Value & Next Steps
+
+* End-to-end flow:
+
+  1. **Synthetic data generation** → `LAB_CALL_CENTER_KM` with built-in anomalies.
+  2. **Snowpark** model training and scoring → `LAB_CALL_CENTER_KM_PROD_SCORED`.
+  3. **Semantic views** → anomaly fact views and KPI summaries.
+  4. **BI dashboards** → top anomalous calls by agent, call type, month.
+  5. **Cortex + mistral-large2** → explanations in `CALL_CENTER_ANOMALY_EXPLANATIONS` and narrative views.
+* Next steps (if this were production):
+
+  * Automate daily scoring and explanation jobs.
+  * Add more anomaly types (KM misuse, abnormal escalation patterns).
+  * Integrate with workforce management / QA workflows for real follow-up.
+
+---
+
+If you want, I can turn this outline into **speaker notes** per slide or into a **.pptx structure** you can copy into your actual deck with titles and placeholder text boxes.
